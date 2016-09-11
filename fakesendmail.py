@@ -165,8 +165,9 @@ class EmailFilter(object):
             # Find if its spam
             self.test_spam(spam_threshold)
         except:
-            print format_exc()
-            self.notify_problem(format_exc, self.saved_email_path)
+            exctext = format_exc()
+            print exctext
+            self.notify_problem(exctext, self.saved_email_path)
             return 1
 
         # Finally deliver it calling ssmtp with the same parameters we got
