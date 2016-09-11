@@ -63,6 +63,8 @@ class EmailFilter(object):
 
         self.real_sendmail = real_sendmail
         self.logdir = log_directory
+        if not os.path.exists(log_directory):
+            os.makedirs(log_directory)
         self.saved_email_path = None
         self.notify_info = notify_info
         self.get_params()
