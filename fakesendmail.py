@@ -93,7 +93,7 @@ class EmailFilter(object):
 
         from_ = self.email_object['from'].lower().strip()
         print from_
-        if from_.lower() not in VALID_SENDERS:
+        if from_.lower() not in valid_senders:
             # Log it and return
             self.save_email('unauthorized_sender')
             print('ERROR: unathorized sender {0}'.format(from_))
@@ -195,8 +195,10 @@ The original message can be find at the path:
 # Yeah, change this
 VALID_SENDERS = [i.lower().strip() for i in [
     'RotarySpainClub@club-rx8.com',
+    'rotaryspainclub@rotaryspainclub.com',
     'admin@rotaryspainclub.com',
     'juanjux@gmail.com',
+    'juanjux@yahoo.es',
     'juanjux+web@gmail.com',
     'juanjux+test@gmail.com',
     'juanjo@juanjoalvarez.net',
