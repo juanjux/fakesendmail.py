@@ -62,23 +62,30 @@ class EmailFilter(object):
         """
 
         self.real_sendmail = real_sendmail
+
         self.logdir = log_directory
         if not os.path.exists(log_directory):
             os.makedirs(log_directory)
+
         self.saved_email_path = None
         self.notify_info = notify_info
         self.get_params()
 
-    def save_email(self, subdir, suffix = ''):
-        assert self.email_object
-
-        fname = get_random_fname() + suffix
-        fullpath = pjoin(self.logdir, subdir, fname)
+    def log_entry(self, fullpath = None, exctext = None):
         with open(pjoin(self.logdir, 'fakesendmail.log'), 'a') as f:
             f.write(time.ctime() + '\n')
             f.write('PARAMS: ' + ','.join(self.params) + '\n')
-            f.write('FILE: {0}'.format(fullpath))
+            if fullpath:
+                f.write('FILE: {0}'.format(fullpath) + '\n')
+            if exctext:
+                f.write(exctext + '\n')
             f.write('\n-------\n')
+
+
+    def save_email(self, subdir, suffix = ''):
+        fname = get_random_fname() + suffix
+        fullpath = pjoin(self.logdir, subdir, fname)
+        self.log_entry(fullpath = fullpath)
 
         with open(fullpath, 'w') as out:
             out.write(self.email_object.as_string())
@@ -92,7 +99,6 @@ class EmailFilter(object):
         assert self.email_object
 
         from_ = self.email_object['from'].lower().strip()
-        print from_
         if from_.lower() not in valid_senders:
             # Log it and return
             self.save_email('unauthorized_sender')
@@ -123,6 +129,12 @@ class EmailFilter(object):
                 continue
             elif not inline_addrs:
                 self.param_addresses.append(token)
+
+        if not inline_addrs and not self.param_addresses:
+            errmsg = "ERROR: Wrong params, no address list and no -t"
+            self.log_entry(exctext = errmsg)
+            sys.exit(1)
+
 
     def notify_problem(self, error, emailpath):
         if self.notify_info:
@@ -156,9 +168,9 @@ class EmailFilter(object):
             The return value of the real sendmail program or 1 if there was any
             other error.
         """
-        assert self.email_object
 
         try:
+            assert self.email_object
             # Find if any of the valid senders is not in the valid senders
             self.test_validsender(valid_senders)
 
@@ -167,6 +179,7 @@ class EmailFilter(object):
         except:
             exctext = format_exc()
             print exctext
+            self.log_entry(exctext = exctext)
             self.notify_problem(exctext, self.saved_email_path)
             return 1
 
