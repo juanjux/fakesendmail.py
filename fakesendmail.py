@@ -7,7 +7,14 @@ to be suspended because somebody hacked into your server and started
 sending massive amounts of email.
 
 Usually you would rename the sendmail binary and put a link to this program
-as /usr/sbin/sendmail
+as /usr/sbin/sendmail. Check that the directory where the program is located is
+accesible by any user of sendmail (for example, not a $HOME directory; /opt or
+/usr/local are common choices).
+
+Also, make sure that the log directory (by default
+/var/log/fakesendmail, configurable with an argument to the constructor) have
+write permissions (and exec permissions for the directories) for whatever software
+is going to run the fake sendmail.
 
 You would also want to rename or uninstall mailx or any other means to
 send email from your server (those spam sending scripts will try everything).
@@ -18,7 +25,7 @@ Author: Juanjo Alvarez <juanjux@gmail.com>
 License: MIT https://opensource.org/licenses/mit-license.php
 """
 
-import sys, os, antispam, time, random, string
+import sys, os, antispam, time, random, string, copy, re, syslog
 from email import message_from_string
 from subprocess import Popen, PIPE
 from traceback import format_exc
@@ -33,10 +40,17 @@ def get_random_fname():
 
 def real_send(real_sendmail, email_text, params = None):
     params = [] if params is None else params
-    ps = Popen([real_sendmail] + params, stdin=PIPE, stderr=PIPE)
+    cmdlist = [real_sendmail] + params
+    ps = Popen(cmdlist, stdin=PIPE, stderr=PIPE)
     ps.stdin.write(email_text)
     (stdout, stderr) = ps.communicate()
-    return ps.returncode
+    return ps.returncode, stdout,stderr
+
+def joincreate(*args):
+    path = pjoin(*args)
+    if not os.path.exists(path):
+        os.makedirs(path)
+    return path
 
 class SpamMessageException(Exception): pass
 class UnauthorizedSenderException(Exception): pass
@@ -61,6 +75,7 @@ class EmailFilter(object):
             (but the log will still reflect the problems).
         """
 
+        syslog.openlog(ident = 'fakesendmail', facility = syslog.LOG_MAIL)
         self.real_sendmail = real_sendmail
 
         self.logdir = log_directory
@@ -71,21 +86,18 @@ class EmailFilter(object):
         self.notify_info = notify_info
         self.get_params()
 
-    def log_entry(self, fullpath = None, exctext = None):
-        with open(pjoin(self.logdir, 'fakesendmail.log'), 'a') as f:
-            f.write(time.ctime() + '\n')
-            f.write('PARAMS: ' + ','.join(self.params) + '\n')
-            if fullpath:
-                f.write('FILE: {0}'.format(fullpath) + '\n')
-            if exctext:
-                f.write(exctext + '\n')
-            f.write('\n-------\n')
+    def log_entry(self, fullpath = None, exctext = None, priority = syslog.LOG_NOTICE):
+        msgstr = 'Stored [ {} ]'.format(fullpath)
 
+        if exctext:
+            msgstr += 'Exception: [ {} ]'.format(exctext)
 
-    def save_email(self, subdir, suffix = ''):
+        syslog.syslog(msgstr)
+
+    def save_email(self, subdir, suffix = '', priority = syslog.LOG_NOTICE):
         fname = get_random_fname() + suffix
-        fullpath = pjoin(self.logdir, subdir, fname)
-        self.log_entry(fullpath = fullpath)
+        fullpath = pjoin(joincreate(self.logdir, subdir), fname)
+        self.log_entry(fullpath = fullpath, priority = priority)
 
         with open(fullpath, 'w') as out:
             out.write(self.email_object.as_string())
@@ -97,23 +109,31 @@ class EmailFilter(object):
             return
 
         assert self.email_object
+        allsenders = copy.copy(self.param_addresses)
 
-        from_ = self.email_object['from'].lower().strip()
-        if from_.lower() not in valid_senders:
-            # Log it and return
-            self.save_email('unauthorized_sender')
-            print('ERROR: unathorized sender {0}'.format(from_))
-            sys.exit(1)
+        from_email = self.email_object['from'].split()[-1].lower().strip()
+        from_email = re.sub(r'[<>]', '', from_email)
+        allsenders.append(from_email)
+
+        for sender in allsenders:
+            if sender not in valid_senders:
+                # Log it and return
+                self.save_email('unauthorized_sender', priority = syslog.LOG_WARNING)
+                print('ERROR: unathorized sender {0}'.format(sender))
+                os._exit(1)
 
     def test_spam(self, threshold):
         assert self.email_object
 
-        detector = antispam.Detector(path = pjoin(self.logdir, 'bayesian_model', 'model.pkl'))
+        detector = antispam.Detector(
+            path = pjoin(joincreate(self.logdir, 'bayesian_model'), 'model.pkl')
+        )
 
         if detector.score(self.email_object.as_string()) > threshold:
-            self.save_email('spam')
+            self.save_email('spam', suffix= '_' + str(threshold),
+                            priority = syslog.LOG_WARNING)
             print('ERROR: spam email detected')
-            sys.exit(1)
+            os._exit(1)
 
     def get_params(self):
         self.params = []
@@ -122,6 +142,7 @@ class EmailFilter(object):
         inline_addrs = False
 
         for token in sys.argv[1:]:
+            token = token.lower().strip()
             if token[0] == '-':
                 self.params.append(token)
                 if token == '-t':
@@ -132,8 +153,8 @@ class EmailFilter(object):
 
         if not inline_addrs and not self.param_addresses:
             errmsg = "ERROR: Wrong params, no address list and no -t"
-            self.log_entry(exctext = errmsg)
-            sys.exit(1)
+            self.log_entry(exctext = errmsg, priority = syslog.LOG_WARNING)
+            os._exit(1)
 
 
     def notify_problem(self, error, emailpath):
@@ -179,15 +200,18 @@ class EmailFilter(object):
         except:
             exctext = format_exc()
             print exctext
-            self.log_entry(exctext = exctext)
+            self.log_entry(exctext = exctext, priority = syslog.LOG_ERR)
             self.notify_problem(exctext, self.saved_email_path)
             return 1
 
         # Finally deliver it calling ssmtp with the same parameters we got
-        retcode = real_send(self.real_sendmail, self.email_object.as_string(),
-                            self.params + self.param_addresses)
+        retcode, stdout,stderr = real_send(self.real_sendmail, self.email_object.as_string(),
+                                           self.params + self.param_addresses)
+
         if retcode != 0:
-            self.save_email('deliver_fail', suffix = '_' + str(retcode))
+            self.log_entry(exctext = stderr, priority = syslog.LOG_ERR)
+            self.save_email('deliver_fail', suffix = '_' + str(retcode),
+                            priority = syslog.LOG_ERR)
         else:
             # Delivered, save a copy
             self.save_email('ok')
@@ -227,4 +251,5 @@ if __name__  == '__main__':
     }
     f = EmailFilter()
     f.read_from_stdin()
-    sys.exit(f.process_email(valid_senders = VALID_SENDERS))
+    retcode = f.process_email(valid_senders = VALID_SENDERS)
+    os._exit(retcode)
